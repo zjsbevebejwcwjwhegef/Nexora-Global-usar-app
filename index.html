@@ -1006,6 +1006,7 @@
 
     async function loadMyReferrals(uid) {
       const countEl = document.getElementById("referCountText");
+      const earnEl = document.getElementById("referEarnText");
       const titleEl = document.getElementById("myReferralListTitle");
       const listEl = document.getElementById("myReferralList");
       if (!uid || !countEl || !listEl) return;
@@ -1013,19 +1014,34 @@
         const q = query(collection(db, "referrals"), where("referrerUid", "==", uid));
         const snap = await getDocs(q);
         const referrals = snap.docs.map(d => d.data());
-        countEl.textContent = referrals.length + " জন";
-        if (titleEl) titleEl.textContent = `রেফারের তালিকা (${referrals.length})`;
-        listEl.innerHTML = referrals.length
+        const refCount = referrals.length;
+        window.currentUser = {
+          ...(window.currentUser || {}),
+          referCount: refCount,
+          referralCount: refCount
+        };
+        countEl.textContent = refCount + " জন";
+        if (earnEl) earnEl.textContent = "৳" + (refCount * 2).toFixed(2);
+        if (titleEl) titleEl.textContent = `রেফারের তালিকা (${refCount})`;
+        listEl.innerHTML = refCount
           ? referrals.map((r, i) => `<div class="flex items-center justify-between rounded-lg bg-gray-50 px-3 py-2 text-left"><span class="font-semibold text-gray-700">${i + 1}. Member</span><span class="text-[10px] text-gray-400">Joined</span></div>`).join("")
           : "আপনি এখনো কাউকে রেফার করেননি। আপনার লিংক শেয়ার করে শুরু করুন";
+        if (typeof window.renderAdminConfigurableSections === "function") {
+          window.renderAdminConfigurableSections();
+        }
       } catch (e) {
+        window.currentUser = { ...(window.currentUser || {}), referCount: 0, referralCount: 0 };
         countEl.textContent = "0 জন";
+        if (earnEl) earnEl.textContent = "৳0.00";
         if (titleEl) titleEl.textContent = "রেফারের তালিকা (0)";
         listEl.textContent = "রেফার তালিকা লোড করা যায়নি।";
+        if (typeof window.renderAdminConfigurableSections === "function") {
+          window.renderAdminConfigurableSections();
+        }
       }
     }
 
-    window.currentUser = { name: "Hamin Abdul", email: "ncmijan40@gmail.com", uid: "demo123" };
+    window.currentUser = { name: "Hamin Abdul", email: "ncmijan40@gmail.com", uid: "demo123", referCount: 0, referralCount: 0 };
     window.userBalance = 0.00;
     window.totalWithdrawn = 0.00;
     window.withdrawHistory = [];
@@ -1062,9 +1078,26 @@
       const store = window.adminStore || {};
       const fsUsers = Array.isArray(window.firestoreUsersList) ? window.firestoreUsersList : [];
       const stUsers = Array.isArray(store.users) ? store.users : [];
-      const rawUsers = fsUsers.length ? fsUsers : stUsers;
+      const mergedMap = new Map();
 
-      const list = [...rawUsers]
+      [...fsUsers, ...stUsers].forEach((u, i) => {
+        if (!u) return;
+        const key = String(u.uid || u.id || u.email || ("idx_" + i));
+        const existing = mergedMap.get(key) || {};
+        mergedMap.set(key, { ...existing, ...u });
+      });
+
+      if (window.currentUser && window.currentUser.uid && window.currentUser.uid !== "demo123") {
+        const curKey = String(window.currentUser.uid || window.currentUser.email);
+        const curExisting = mergedMap.get(curKey) || {};
+        mergedMap.set(curKey, {
+          ...curExisting,
+          ...window.currentUser,
+          balance: Number(window.userBalance ?? window.currentUser.balance ?? curExisting.balance ?? 0)
+        });
+      }
+
+      const list = Array.from(mergedMap.values())
         .map(u => ({
           name: u?.name || "Member",
           email: u?.email || "",
@@ -1093,7 +1126,7 @@
     window.renderLeadershipIncome = renderLeadershipIncome;
 
     onSnapshot(collection(db, "users"), (snap) => {
-      window.firestoreUsersList = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      window.firestoreUsersList = snap.docs.map(d => ({ id: d.id, uid: d.id, ...d.data() }));
       renderLeadershipIncome();
     }, () => {});
 
@@ -1216,6 +1249,7 @@
       window.userBalance = parseFloat(bal) || 0;
       document.querySelectorAll(".sync-balance").forEach(el => el.innerText = window.userBalance.toFixed(2));
       document.getElementById("profTotalWithdraw").innerText = "৳" + window.totalWithdrawn.toFixed(2);
+      renderLeadershipIncome();
     };
 
     window.addBalance = async function(amount, label) {
@@ -1292,8 +1326,8 @@
 
     async function enterApp(user, bal) {
       if (user.status === "blocked") { alert("আপনার অ্যাকাউন্ট ব্লক করা হয়েছে।"); signOut(auth); return; }
-      await afterEnter(user);
-      window.currentUser = user;
+      window.currentUser = { ...user, referCount: Number(user.referCount || user.referralCount || 0), referralCount: Number(user.referralCount || user.referCount || 0) };
+      await afterEnter(window.currentUser);
       document.getElementById("authSection").classList.add("hidden");
       document.getElementById("mainApp").classList.remove("hidden");
       document.getElementById("sideUserEmail").innerText = user.name || "Member";
@@ -1387,7 +1421,7 @@
         } catch (e) { console.warn("Could not create numeric referral code", e); }
       }
       document.getElementById("myReferLink").value = makeReferralLink(referralCode || "0000000000");
-      loadMyReferrals(user.uid);
+      await loadMyReferrals(user.uid);
       const rc = document.querySelector('#profilePage input[value="8998943357"]');
       if (rc) rc.value = referralCode;
       document.getElementById("profPhone").value = user.phone || "";
@@ -1399,7 +1433,11 @@
       unsubU = onSnapshot(doc(db, "users", user.uid), (s) => {
         if (!s.exists()) return;
         const d = s.data();
-        Object.assign(window.currentUser, d);
+        const keepRefs = Number(window.currentUser?.referCount ?? window.currentUser?.referralCount ?? 0);
+        Object.assign(window.currentUser, d, {
+          referCount: Math.max(keepRefs, Number(d.referCount ?? d.referralCount ?? 0)),
+          referralCount: Math.max(keepRefs, Number(d.referralCount ?? d.referCount ?? 0))
+        });
         if (d.status === "blocked") { signOut(auth); return; }
         document.getElementById("sideUserEmail").innerText = d.name || window.currentUser?.name || "Member";
         window.updateBalanceUI(d.balance || 0);
@@ -2063,7 +2101,7 @@
       if (!box) return;
       const store = window.adminStore || {};
       const list = (Array.isArray(store.targets) && store.targets.length ? store.targets : DEF_UI_TARGETS).filter(t => t && t.active !== false);
-      const userRefs = Number(window.currentUser?.referCount || 0);
+      const userRefs = Number(window.currentUser?.referCount ?? window.currentUser?.referralCount ?? 0);
       const claimedOffers = Array.isArray(window.currentUser?.claimedOffers) ? window.currentUser.claimedOffers : [];
       const slots = Number(store.targetMeta?.totalSlots ?? 5);
 
@@ -2127,7 +2165,7 @@
       if (!box) return;
       const store = window.adminStore || {};
       const list = (Array.isArray(store.salaries) && store.salaries.length ? store.salaries : DEF_UI_SALARIES).filter(s => s && s.active !== false);
-      const userRefs = Number(window.currentUser?.referCount || 0);
+      const userRefs = Number(window.currentUser?.referCount ?? window.currentUser?.referralCount ?? 0);
       const claimedOffers = Array.isArray(window.currentUser?.claimedOffers) ? window.currentUser.claimedOffers : [];
 
       let claimedCount = 0;
